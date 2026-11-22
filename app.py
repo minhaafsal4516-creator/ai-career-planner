@@ -193,6 +193,108 @@ def career_response_schema():
     )
 
 
+# This schema keeps the role comparisons and location suggestions consistent.
+def opportunity_response_schema():
+    text_schema = lambda description: types.Schema(type=types.Type.STRING, description=description)
+
+    comparison_schema = types.Schema(
+        type=types.Type.OBJECT,
+        required=[
+            "title",
+            "match_score",
+            "why_it_fits",
+            "strong_matches",
+            "missing_skills",
+            "requirements",
+            "salary_range_lpa",
+            "next_step",
+        ],
+        properties={
+            "title": text_schema("Career role title"),
+            "match_score": types.Schema(
+                type=types.Type.INTEGER,
+                minimum=0,
+                maximum=100,
+            ),
+            "why_it_fits": text_schema("How this role fits the user's existing profile"),
+            "strong_matches": types.Schema(
+                type=types.Type.ARRAY,
+                min_items=1,
+                max_items=4,
+                items=text_schema("An existing strength relevant to the role"),
+            ),
+            "missing_skills": types.Schema(
+                type=types.Type.ARRAY,
+                min_items=1,
+                max_items=4,
+                items=text_schema("A skill to build for this role"),
+            ),
+            "requirements": text_schema("Typical skills or qualifications employers may expect"),
+            "salary_range_lpa": text_schema("Indicative annual salary range in lakh rupees"),
+            "next_step": text_schema("One practical action to improve prospects for this role"),
+        },
+    )
+
+    recommendation_schema = types.Schema(
+        type=types.Type.OBJECT,
+        required=["category", "title", "details", "search_query"],
+        properties={
+            "category": text_schema(
+                "One of: Nearby roles, Companies to explore, Internships, Remote work, Career paths"
+            ),
+            "title": text_schema("A type of opportunity or organization to explore"),
+            "details": text_schema("A location-aware suggestion; do not claim an opening is confirmed"),
+            "search_query": text_schema("A practical search phrase the user can try"),
+        },
+    )
+
+    return types.Schema(
+        type=types.Type.OBJECT,
+        required=["comparisons", "recommendations", "action_plan"],
+        properties={
+            "comparisons": types.Schema(
+                type=types.Type.ARRAY,
+                min_items=2,
+                max_items=3,
+                items=comparison_schema,
+            ),
+            "recommendations": types.Schema(
+                type=types.Type.ARRAY,
+                min_items=5,
+                max_items=7,
+                items=recommendation_schema,
+            ),
+            "action_plan": types.Schema(
+                type=types.Type.ARRAY,
+                min_items=3,
+                max_items=3,
+                items=text_schema("An actionable next step for the user's career"),
+            ),
+        },
+    )
+
+
+def call_opportunity_gemini(client, model, contents):
+    return client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=(
+                "You are a practical career adviser for students and job seekers in India. "
+                "Compare only the selected roles using the user's actual profile and existing career plan. "
+                "Do not assume skills the user did not mention, promise a job or salary, or invent current "
+                "vacancies, hiring activity, internships, or company presence. Give indicative salary ranges "
+                "in lakh rupees per year. Location-based recommendations are research leads and search ideas "
+                "that the user must verify, not confirmed openings. Suggest realistic requirements and "
+                "personalized next steps. Return exactly the requested JSON structure."
+            ),
+            temperature=0.7,
+            response_mime_type="application/json",
+            response_schema=opportunity_response_schema(),
+        ),
+    )
+
+
 def call_gemini(client, model, contents):
     return client.models.generate_content(
         model=model,
@@ -231,6 +333,7 @@ if submitted:
         }
         st.session_state.career_plan = None
         st.session_state.chat_history = []
+        st.session_state.opportunity_result = None
 
         try:
             client = genai.Client(
@@ -351,22 +454,177 @@ if plan:
     for gap in plan["skill_gaps"]:
         st.write(f"**{gap['skill']}:** {gap['free_resource']}")
 
-    st.subheader("Your 90-day roadmap")
-    tab_1, tab_2, tab_3 = st.tabs(["Days 1-30", "Days 31-60", "Days 61-90"])
-    phases = [
-        (tab_1, "days_1_30"),
-        (tab_2, "days_31_60"),
-        (tab_3, "days_61_90"),
-    ]
-    for tab, phase_key in phases:
-        with tab:
-            phase = plan["roadmap"][phase_key]
-            for task_index, task in enumerate(phase["tasks"]):
-                st.checkbox(task, key=f"{phase_key}_task_{task_index}")
-            st.markdown(
-                f'<div class="project-box"><strong>Mini project</strong><br>{phase["mini_project"]}</div>',
-                unsafe_allow_html=True,
+    roadmap_tab, opportunities_tab = st.tabs(["Your 90-day roadmap", "Career Opportunities"])
+    with roadmap_tab:
+        st.subheader("Your 90-day roadmap")
+        tab_1, tab_2, tab_3 = st.tabs(["Days 1-30", "Days 31-60", "Days 61-90"])
+        phases = [
+            (tab_1, "days_1_30"),
+            (tab_2, "days_31_60"),
+            (tab_3, "days_61_90"),
+        ]
+        for tab, phase_key in phases:
+            with tab:
+                phase = plan["roadmap"][phase_key]
+                for task_index, task in enumerate(phase["tasks"]):
+                    st.checkbox(task, key=f"{phase_key}_task_{task_index}")
+                st.markdown(
+                    f'<div class="project-box"><strong>Mini project</strong><br>{phase["mini_project"]}</div>',
+                    unsafe_allow_html=True,
+                )
+
+    # This tab compares selected roles and suggests local job-search leads.
+    with opportunities_tab:
+        st.subheader("Compare roles and explore opportunities")
+        st.caption(
+            "Compare roles using your saved career plan, then explore location-based leads. "
+            "Suggestions are not confirmed vacancies; check current details with employers."
+        )
+        with st.form("career_opportunities"):
+            preferred_location = st.text_input(
+                "Preferred city or region",
+                value=st.session_state.get("opportunity_location", ""),
+                placeholder="For example, Kochi or Bengaluru",
             )
+            selected_roles = st.multiselect(
+                "Choose roles to compare",
+                options=[role["title"] for role in plan["roles"]],
+                default=[role["title"] for role in plan["roles"]],
+                max_selections=3,
+            )
+            work_preference = st.selectbox(
+                "Work preference",
+                ["Any", "On-site or nearby", "Remote", "Internship"],
+            )
+            find_opportunities = st.form_submit_button(
+                "🔎 Compare roles and find opportunities",
+                type="primary",
+                use_container_width=True,
+            )
+
+        if find_opportunities:
+            missing = []
+            if not preferred_location.strip():
+                missing.append("your preferred city or region")
+            if len(selected_roles) < 2:
+                missing.append("at least two roles to compare")
+
+            if missing:
+                st.warning("Please add " + " and ".join(missing) + ".")
+            else:
+                st.session_state.opportunity_location = preferred_location.strip()
+                st.session_state.opportunity_result = None
+                profile = st.session_state.profile_answers
+                opportunity_prompt = (
+                    "Compare the selected career roles and suggest location-aware opportunities. "
+                    "Use the user's answers and existing plan as the only evidence about their skills. "
+                    "Include nearby role search ideas, companies to research, internship search ideas, "
+                    "remote work search ideas, and realistic related career paths where relevant. "
+                    "Do not claim that an opening, company office, or internship is currently available.\n\n"
+                    f"USER PROFILE:\n{json.dumps(profile, ensure_ascii=False)}\n\n"
+                    f"EXISTING CAREER PLAN:\n{json.dumps(plan, ensure_ascii=False)}\n\n"
+                    f"SELECTED ROLES:\n{json.dumps(selected_roles, ensure_ascii=False)}\n\n"
+                    f"PREFERRED LOCATION: {preferred_location.strip()}\n"
+                    f"WORK PREFERENCE: {work_preference}"
+                )
+
+                try:
+                    client = genai.Client(
+                        api_key=st.secrets["GEMINI_API_KEY"],
+                        http_options=types.HttpOptions(api_version="v1beta"),
+                    )
+                    with st.spinner("Comparing roles and finding relevant search leads..."):
+                        try:
+                            response = call_opportunity_gemini(
+                                client,
+                                "gemini-3.5-flash-lite",
+                                opportunity_prompt,
+                            )
+                        except errors.APIError as first_error:
+                            if first_error.code not in (429, 500, 503, 504):
+                                raise
+                            try:
+                                response = call_opportunity_gemini(
+                                    client,
+                                    "gemini-3.5-flash-lite",
+                                    opportunity_prompt,
+                                )
+                            except errors.APIError as retry_error:
+                                if retry_error.code not in (429, 500, 503, 504):
+                                    raise
+                                response = call_opportunity_gemini(
+                                    client,
+                                    "gemini-3.5-flash-lite-lite",
+                                    opportunity_prompt,
+                                )
+
+                    st.session_state.opportunity_result = json.loads(response.text)
+                except KeyError:
+                    st.error(
+                        "Gemini API key is missing. Add GEMINI_API_KEY to your Streamlit secrets, then try again."
+                    )
+                except errors.APIError as error:
+                    if error.code == 429:
+                        st.error("Gemini's usage limit was reached. Check your API quota, then try again.")
+                    elif error.code in (500, 503, 504):
+                        st.error("Gemini is temporarily unavailable. Please wait a moment and try again.")
+                    elif error.code in (401, 403):
+                        st.error("Gemini rejected the API key. Check that it is correct and has API access.")
+                    else:
+                        st.error(f"Gemini could not complete the request (error {error.code}). Please try again.")
+                except json.JSONDecodeError:
+                    st.error("Gemini returned an incomplete comparison. Please try again.")
+                except Exception as error:
+                    st.error(f"Something unexpected happened ({type(error).__name__}). Please try again.")
+
+        opportunity_result = st.session_state.get("opportunity_result")
+        if opportunity_result:
+            st.markdown("#### Role comparison")
+            st.bar_chart(
+                {
+                    "Role": [comparison["title"] for comparison in opportunity_result["comparisons"]],
+                    "Match score": [
+                        comparison["match_score"] for comparison in opportunity_result["comparisons"]
+                    ],
+                },
+                x="Role",
+                y="Match score",
+            )
+            comparison_rows = [
+                {
+                    "Role": comparison["title"],
+                    "Skill match": f'{comparison["match_score"]}%',
+                    "Indicative salary (LPA)": comparison["salary_range_lpa"],
+                    "Key requirements": comparison["requirements"],
+                }
+                for comparison in opportunity_result["comparisons"]
+            ]
+            st.dataframe(comparison_rows, use_container_width=True, hide_index=True)
+
+            for comparison in opportunity_result["comparisons"]:
+                with st.expander(f'{comparison["title"]} · {comparison["match_score"]}% match'):
+                    st.progress(max(0, min(100, comparison["match_score"])) / 100)
+                    st.write(comparison["why_it_fits"])
+                    st.write(f'**Strong matches:** {", ".join(comparison["strong_matches"])}')
+                    st.write(f'**Skills to build:** {", ".join(comparison["missing_skills"])}')
+                    st.write(f'**Typical requirements:** {comparison["requirements"]}')
+                    st.write(f'**Salary potential:** {comparison["salary_range_lpa"]} (indicative)')
+                    st.write(f'**Next step:** {comparison["next_step"]}')
+
+            st.markdown("#### Location-based recommendations")
+            st.caption(
+                f"Search leads for {st.session_state.get('opportunity_location', 'your area')}; "
+                "verify current openings, locations, and eligibility before applying."
+            )
+            for recommendation in opportunity_result["recommendations"]:
+                with st.container(border=True):
+                    st.markdown(f'**{recommendation["category"]}: {recommendation["title"]}**')
+                    st.write(recommendation["details"])
+                    st.caption(f'Try searching: {recommendation["search_query"]}')
+
+            st.markdown("#### Your next steps")
+            for action in opportunity_result["action_plan"]:
+                st.markdown(f"- {action}")
 
     st.download_button(
         "⬇️ Download my plan",

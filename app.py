@@ -1,33 +1,28 @@
-# CHECKPOINT 1 — "Hello, AI builder"
-# This is the file every attendee starts with. If you can see this page
-# in the preview on the right, your setup is done.
-# It uses the same page layout as the final app, so the look never changes.
+import json
 
 import streamlit as st
 from google import genai
 from google.genai import errors, types
 
 SYSTEM_PROMPT = """
-You are a Architecture career counsellor for students and job seekers in India.
-Given a person's profile, reply in Markdown with exactly these sections:
-## 3 roles that fit you  — Job Title, Why it fits, Key Responsibilities, quired Skills, Entry Requirements, Salary Range,
-Career Growth.
-## Your skill gaps        — Create a table with columns: Required Skills, Current Skill Level, Missing Skills and How to Improve.
-## Your 90-day roadmap    — Create a realistic 90-day action plan divided into three stages: Days 1–30, 31–60 and 61–90. Include weekly tasks.
-## One thing to do today  — Give one achievable task the user can complete today in under 30 minutes.
-## Opportunities          — Recommend 3 suitable career roles with job descriptions, responsibilities and typical entry-level salary ranges in India.
-## Learning resources     — Recommend relevant courses, certifications, practical training and free learning resources.
-Rules: never promise a job or a salary, simple English, under 450 words, your own rule, Personalize recommendations according to the user's actual profile, Do not recommend unrealistic or unrelated career paths, Use simple, encouraging and professional language, 
-Include realistic Indian salary estimates and identify them as indicative, 
-Never invent qualifications, job openings or course availability, 
-Ask for missing essential information rather than making assumptions, 
-Prioritize practical career development over generic motivation.
+You are a practical Architecture career counsellor for students and job seekers in India.
+Keep the user's real profile in mind and give realistic, personalised advice.
+Rules:
+- Never promise a job or a salary.
+- Personalise recommendations to the user's actual profile.
+- Do not assume skills the user did not mention.
+- If essential information is missing, ask for it instead of making assumptions.
+- Use simple, encouraging and professional language.
+- Salary ranges are indicative estimates for India and vary by location, company and experience.
+- Suggest only free and real learning resources that are practical.
+- Do not invent qualifications, job openings or course availability.
+- Prioritize practical career development over generic motivation.
+- Return exactly the requested JSON structure.
 """
 
 st.set_page_config(page_title="AI Career Planner", page_icon="🎯", layout="centered")
 
-# A little CSS (page styling). "centered" layout keeps everything in a middle
-# column; we make that column a bit wider so the 3 role cards fit side by side.
+# Page styling
 st.markdown(
     """
     <style>
@@ -39,13 +34,17 @@ st.markdown(
             letter-spacing: 0.05em; text-transform: uppercase; margin-bottom: 0.3rem; }
     .score { font-size: 2.4rem; font-weight: 700; color: #2563EB; line-height: 1.1; }
     .score span { font-size: 1rem; font-weight: 500; color: #475569; }
+    .today-box { background: #DCFCE7; border: 1px solid #86EFAC; border-radius: 12px;
+                 padding: 1rem 1.2rem; margin: 0.5rem 0 1.2rem; color: #166534; }
+    .project-box { background: #EFF6FF; border: 1px solid #93C5FD; border-radius: 10px;
+                   padding: 0.8rem 1rem; margin-top: 0.8rem; }
     .footer { text-align: center; color: #64748B; font-size: 0.85rem; padding: 0.5rem 0 1rem; }
     </style>
     """,
     unsafe_allow_html=True,
 )
 
-# Centered title and subtitle
+# Header
 st.markdown(
     """
     <div class="hero">
@@ -56,9 +55,16 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Profile form
+# Resume upload
+st.markdown('<div class="step">Step 1 · Resume (optional)</div>', unsafe_allow_html=True)
+resume_pdf = st.file_uploader("Upload your resume PDF", type=["pdf"])
+st.caption(
+    "Your resume is sent to Google Gemini to make your plan and is not stored by "
+    "this app. On Gemini's free tier Google may use it to improve its products."
+)
+
 with st.form("about_you"):
-    st.subheader("About you")
+    st.subheader("Step 2 · About you")
 
     name_col, education_col = st.columns(2)
     with name_col:
@@ -91,7 +97,8 @@ with st.form("about_you"):
 
     skills_col, interests_col = st.columns(2)
     with skills_col:
-        skills = st.text_area("Skills you already have")
+        skills_label = "Skills you already have (optional with resume)" if resume_pdf else "Skills you already have"
+        skills = st.text_area(skills_label)
     with interests_col:
         interests = st.text_area("What do you enjoy?")
 
@@ -99,35 +106,131 @@ with st.form("about_you"):
     hours = st.slider("Hours per week you can study", 2, 40, 10)
 
     submitted = st.form_submit_button(
-        "🚀 Plan my career",
+        "🚀 Build my career dashboard",
         type="primary",
         use_container_width=True,
     )
+
+
+def career_response_schema():
+    text_schema = lambda description: types.Schema(type=types.Type.STRING, description=description)
+
+    role_schema = types.Schema(
+        type=types.Type.OBJECT,
+        required=["title", "why_it_fits", "match_score", "salary_range_lpa"],
+        properties={
+            "title": text_schema("Career role title"),
+            "why_it_fits": text_schema("Why this role fits the user's profile"),
+            "match_score": types.Schema(
+                type=types.Type.INTEGER,
+                minimum=0,
+                maximum=100,
+            ),
+            "salary_range_lpa": text_schema("Indicative salary range in lakh rupees per year"),
+        },
+    )
+
+    skill_schema = types.Schema(
+        type=types.Type.OBJECT,
+        required=["skill", "current_level", "needed_level", "free_resource"],
+        properties={
+            "skill": text_schema("Skill name"),
+            "current_level": types.Schema(
+                type=types.Type.INTEGER,
+                minimum=0,
+                maximum=10,
+            ),
+            "needed_level": types.Schema(
+                type=types.Type.INTEGER,
+                minimum=0,
+                maximum=10,
+            ),
+            "free_resource": text_schema("A free learning resource"),
+        },
+    )
+
+    phase_schema = types.Schema(
+        type=types.Type.OBJECT,
+        required=["tasks", "mini_project"],
+        properties={
+            "tasks": types.Schema(
+                type=types.Type.ARRAY,
+                min_items=3,
+                max_items=3,
+                items=text_schema("One practical roadmap task"),
+            ),
+            "mini_project": text_schema("A small practical project"),
+        },
+    )
+
+    return types.Schema(
+        type=types.Type.OBJECT,
+        required=["roles", "skill_gaps", "roadmap", "todays_action"],
+        properties={
+            "roles": types.Schema(
+                type=types.Type.ARRAY,
+                min_items=3,
+                max_items=3,
+                items=role_schema,
+            ),
+            "skill_gaps": types.Schema(
+                type=types.Type.ARRAY,
+                min_items=4,
+                max_items=6,
+                items=skill_schema,
+            ),
+            "roadmap": types.Schema(
+                type=types.Type.OBJECT,
+                required=["days_1_30", "days_31_60", "days_61_90"],
+                properties={
+                    "days_1_30": phase_schema,
+                    "days_31_60": phase_schema,
+                    "days_61_90": phase_schema,
+                },
+            ),
+            "todays_action": text_schema("One achievable action for today"),
+        },
+    )
+
+
+def call_gemini(client, model, contents):
+    return client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            system_instruction=SYSTEM_PROMPT,
+            temperature=0.7,
+            response_mime_type="application/json",
+            response_schema=career_response_schema(),
+        ),
+    )
+
 
 if submitted:
     missing = []
     if not name.strip():
         missing.append("Your name")
-    if not skills.strip():
+    if not resume_pdf and not skills.strip():
         missing.append("Skills you already have")
     if not goal.strip():
         missing.append("Your goal")
 
     if missing:
         st.session_state.profile_answers = None
-        st.session_state.ai_answer = None
+        st.session_state.career_plan = None
         st.warning("Please fill: " + ", ".join(missing))
     else:
         st.session_state.profile_answers = {
             "name": name.strip(),
             "education": education,
             "status": status,
-            "skills": skills.strip(),
+            "skills": skills.strip() or "Not provided; use the uploaded resume",
             "interests": interests.strip(),
             "goal": goal.strip(),
             "hours_per_week": hours,
         }
-        st.session_state.ai_answer = None
+        st.session_state.career_plan = None
+        st.session_state.chat_history = []
 
         try:
             client = genai.Client(
@@ -135,43 +238,41 @@ if submitted:
                 http_options=types.HttpOptions(api_version="v1beta"),
             )
 
-            def call_gemini(model):
-                profile = "\n".join([
-                    f"Name: {name.strip()}",
-                    f"Highest education: {education}",
-                    f"Where are you right now: {status}",
-                    f"Skills: {skills.strip()}",
-                    f"What you enjoy: {interests.strip()}",
-                    f"Goal: {goal.strip()}",
-                    f"Hours per week available to study: {hours}",
-                ])
-                return client.models.generate_content(
-                    model=model,
-                    contents=f"Person's profile:\n{profile}",
-                    config=types.GenerateContentConfig(
-                        system_instruction=SYSTEM_PROMPT,
-                        temperature=0.7,
-                    ),
+            profile = "\n".join([
+                f"Name: {name.strip()}",
+                f"Highest education: {education}",
+                f"Where are you right now: {status}",
+                f"Skills: {skills.strip() or 'Not provided; use the uploaded resume'}",
+                f"What you enjoy: {interests.strip()}",
+                f"Goal: {goal.strip()}",
+                f"Hours per week available to study: {hours}",
+            ])
+            contents = [f"Person's profile:\n{profile}"]
+            if resume_pdf:
+                contents.append(
+                    types.Part.from_bytes(
+                        data=resume_pdf.getvalue(),
+                        mime_type="application/pdf",
+                    )
                 )
 
-            with st.spinner("Thinking about your career..."):
+            with st.spinner("Building your career dashboard..."):
                 try:
-                    response = call_gemini("gemini-3.5-flash-lite")
+                    response = call_gemini(client, "gemini-3.5-flash-lite", contents)
                 except errors.APIError as first_error:
                     if first_error.code not in (429, 500, 503, 504):
                         raise
                     try:
-                        response = call_gemini("gemini-3.5-flash-lite")
+                        response = call_gemini(client, "gemini-3.5-flash-lite", contents)
                     except errors.APIError as retry_error:
                         if retry_error.code not in (429, 500, 503, 504):
                             raise
-                        response = call_gemini("gemini-3.5-flash-lite")
+                        response = call_gemini(client, "gemini-3.5-flash-lite-lite", contents)
 
-            st.session_state.ai_answer = response.text
+            plan = json.loads(response.text)
+            st.session_state.career_plan = plan
         except KeyError:
-            st.error(
-                "Gemini API key is missing. Add GEMINI_API_KEY to your Streamlit secrets, then try again."
-            )
+            st.error("Gemini API key is missing. Add GEMINI_API_KEY to your Streamlit secrets, then try again.")
         except errors.APIError as error:
             if error.code == 429:
                 st.error("Gemini's usage limit was reached. Check your API quota, then try again.")
@@ -181,15 +282,159 @@ if submitted:
                 st.error("Gemini rejected the API key. Check that it is correct and has API access.")
             else:
                 st.error(f"Gemini could not complete the request (error {error.code}). Please try again.")
+        except json.JSONDecodeError:
+            st.error("Gemini returned an incomplete plan. Please try again.")
         except Exception as error:
-            st.error(
-                f"Something unexpected happened ({type(error).__name__}). "
-                "Check the app logs for details, then try again."
+            st.error(f"Something unexpected happened ({type(error).__name__}). Please try again.")
+
+
+def plan_to_markdown(plan):
+    lines = ["# My Career Plan", "", "## Do this today", plan["todays_action"], "", "## Matching roles"]
+    for role in plan["roles"]:
+        lines.extend([
+            f"### {role['title']} - {role['match_score']}%",
+            f"**Why it fits:** {role['why_it_fits']}",
+            f"**Salary (indicative):** {role['salary_range_lpa']}",
+            "",
+        ])
+    lines.extend(["## Skill gaps"])
+    for gap in plan["skill_gaps"]:
+        lines.append(
+            f"- **{gap['skill']}:** {gap['current_level']}/10 now, "
+            f"{gap['needed_level']}/10 needed. Free resource: {gap['free_resource']}"
+        )
+    lines.extend(["", "## 90-day roadmap"])
+    for key, label in [
+        ("days_1_30", "Days 1-30"),
+        ("days_31_60", "Days 31-60"),
+        ("days_61_90", "Days 61-90"),
+    ]:
+        phase = plan["roadmap"][key]
+        lines.extend([f"### {label}"])
+        lines.extend([f"- [ ] {task}" for task in phase["tasks"]])
+        lines.extend([f"**Mini project:** {phase['mini_project']}", ""])
+    return "\n".join(lines)
+
+
+plan = st.session_state.get("career_plan")
+if plan:
+    st.markdown(
+        f'<div class="today-box"><strong>Do this today</strong><br>{plan["todays_action"]}</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.subheader("3 roles that fit you")
+    role_cols = st.columns(3)
+    for column, role in zip(role_cols, plan["roles"]):
+        with column:
+            with st.container(border=True):
+                st.markdown(f"### {role['title']}")
+                st.markdown(
+                    f'<div class="score">{role["match_score"]}<span>/100 match</span></div>',
+                    unsafe_allow_html=True,
+                )
+                st.progress(max(0, min(100, role["match_score"])) / 100)
+                st.write(role["why_it_fits"])
+                st.write(f"**Salary:** {role['salary_range_lpa']} **(indicative)**")
+
+    st.subheader("Skill gaps")
+    chart_data = [
+        {
+            "Skill": gap["skill"],
+            "Current": gap["current_level"],
+            "Needed": gap["needed_level"],
+        }
+        for gap in plan["skill_gaps"]
+    ]
+    st.bar_chart(chart_data, x="Skill", y=["Current", "Needed"], horizontal=True)
+
+    for gap in plan["skill_gaps"]:
+        st.write(f"**{gap['skill']}:** {gap['free_resource']}")
+
+    st.subheader("Your 90-day roadmap")
+    tab_1, tab_2, tab_3 = st.tabs(["Days 1-30", "Days 31-60", "Days 61-90"])
+    phases = [
+        (tab_1, "days_1_30"),
+        (tab_2, "days_31_60"),
+        (tab_3, "days_61_90"),
+    ]
+    for tab, phase_key in phases:
+        with tab:
+            phase = plan["roadmap"][phase_key]
+            for task_index, task in enumerate(phase["tasks"]):
+                st.checkbox(task, key=f"{phase_key}_task_{task_index}")
+            st.markdown(
+                f'<div class="project-box"><strong>Mini project</strong><br>{phase["mini_project"]}</div>',
+                unsafe_allow_html=True,
             )
 
-if st.session_state.get("ai_answer"):
-    with st.container(border=True):
-        st.markdown(st.session_state.ai_answer)
+    st.download_button(
+        "⬇️ Download my plan",
+        data=plan_to_markdown(plan),
+        file_name="my_career_plan.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
+
+    st.subheader("Ask about your plan")
+    if "chat_history" not in st.session_state:
+        st.session_state.chat_history = []
+
+    for message in st.session_state.chat_history:
+        with st.chat_message(message["role"]):
+            st.write(message["content"])
+
+    chat_question = st.chat_input("Ask about your plan")
+    if chat_question:
+        st.session_state.chat_history.append({"role": "user", "content": chat_question})
+        with st.chat_message("user"):
+            st.write(chat_question)
+
+        try:
+            client = genai.Client(
+                api_key=st.secrets["GEMINI_API_KEY"],
+                http_options=types.HttpOptions(api_version="v1beta"),
+            )
+            chat_prompt = (
+                "Use this career plan as context. Answer the question in under 150 words.\n\n"
+                f"PLAN:\n{json.dumps(plan, ensure_ascii=False)}\n\n"
+                f"QUESTION:\n{chat_question}"
+            )
+            with st.spinner("Thinking..."):
+                try:
+                    chat_response = client.models.generate_content(
+                        model="gemini-3.5-flash-lite",
+                        contents=chat_prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=(
+                                "Answer follow-up career questions clearly and in under 150 words. "
+                                "Do not promise jobs or salaries. Label salary estimates as indicative."
+                            ),
+                            temperature=0.7,
+                        ),
+                    )
+                except errors.APIError as chat_error:
+                    if chat_error.code not in (429, 500, 503, 504):
+                        raise
+                    chat_response = client.models.generate_content(
+                        model="gemini-3.5-flash-lite-lite",
+                        contents=chat_prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=(
+                                "Answer follow-up career questions clearly and in under 150 words. "
+                                "Do not promise jobs or salaries. Label salary estimates as indicative."
+                            ),
+                            temperature=0.7,
+                        ),
+                    )
+            answer = chat_response.text
+            st.session_state.chat_history.append({"role": "assistant", "content": answer})
+            with st.chat_message("assistant"):
+                st.write(answer)
+        except KeyError:
+            st.error("Gemini API key is missing. Add GEMINI_API_KEY to your Streamlit secrets.")
+        except Exception as chat_error:
+            st.error(f"Could not answer that question ({type(chat_error).__name__}). Please try again.")
 
 # Footer
 st.divider()
@@ -197,558 +442,3 @@ st.markdown(
     '<div class="footer">Built at the Techolas AI Wing weekend · AI suggestions, not guarantees.</div>',
     unsafe_allow_html=True,
 )
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# import streamlit as st
-# import time
-# from google import genai
-# from google.genai import errors
-
-
-# # --------------------------------------------------
-# # PAGE CONFIGURATION
-# # --------------------------------------------------
-
-# st.set_page_config(
-#     page_title="AI Career Planner",
-#     page_icon="🎯",
-#     layout="wide"
-# )
-
-
-# # --------------------------------------------------
-# # CUSTOM CSS
-# # --------------------------------------------------
-
-# st.markdown("""
-# <style>
-
-#     .stApp {
-#         background-color: #F7F8FC;
-#     }
-
-#     .main-title {
-#         font-size: 42px;
-#         font-weight: 800;
-#         color: #20243A;
-#         text-align: center;
-#         margin-bottom: 5px;
-#     }
-
-#     .subtitle {
-#         font-size: 17px;
-#         color: #666B80;
-#         text-align: center;
-#         margin-bottom: 35px;
-#     }
-
-#     .section-title {
-#         font-size: 23px;
-#         font-weight: 700;
-#         color: #20243A;
-#         margin-top: 20px;
-#     }
-
-#     .result-box {
-#         background-color: white;
-#         padding: 25px;
-#         border-radius: 14px;
-#         border: 1px solid #E5E7EF;
-#         margin-bottom: 20px;
-#     }
-
-#     div.stButton > button {
-#         background-color: #5B5FEF;
-#         color: white;
-#         border-radius: 9px;
-#         border: none;
-#         padding: 12px 25px;
-#         font-weight: 600;
-#         width: 100%;
-#     }
-
-#     div.stButton > button:hover {
-#         background-color: #4448D8;
-#         color: white;
-#     }
-
-#     .footer {
-#         text-align: center;
-#         color: #888888;
-#         font-size: 13px;
-#         margin-top: 50px;
-#     }
-
-# </style>
-# """, unsafe_allow_html=True)
-
-
-# # --------------------------------------------------
-# # CAREER COUNSELLOR SYSTEM PROMPT
-# # --------------------------------------------------
-
-# SYSTEM_PROMPT = """
-# You are an experienced and practical AI Career Counsellor.
-
-# Your role is to guide students, fresh graduates and job seekers
-# towards suitable career opportunities based on their education,
-# skills, interests, experience and career goals.
-
-# The user may be from India. Consider the Indian education system,
-# job market, entry-level opportunities and salary ranges.
-
-# IMPORTANT INSTRUCTIONS:
-
-# 1. Personalise the recommendations using the user's actual profile.
-# 2. Do not recommend careers only because they are popular.
-# 3. Recommend realistic career paths based on the user's current
-#    abilities and interests.
-# 4. Do not invent qualifications, experience or achievements.
-# 5. Identify skill gaps honestly.
-# 6. Give practical actions that can be completed within the
-#    user's available time.
-# 7. Keep the language simple, clear and professional.
-# 8. Avoid unnecessary motivational statements.
-# 9. Do not guarantee employment, salary or career success.
-# 10. Salary ranges must be indicative estimates for India.
-#     Mention that they vary by location, company and experience.
-# 11. Suggest relevant learning resources. Do not invent courses,
-#     certifications, institutions or website links.
-# 12. Avoid repeating the same information in different sections.
-
-# STRICT OUTPUT FORMAT:
-
-# ## 1. Three Roles That Fit You
-
-# Recommend exactly THREE suitable career roles.
-
-# For each role include:
-
-# - Job Title
-# - Why It Fits
-# - Key Responsibilities
-# - Required Skills
-# - Entry Requirements
-# - Indicative Entry-Level Salary in India
-# - Career Growth
-
-# Rank the roles from most suitable to least suitable.
-
-# ## 2. Your Skill Gaps
-
-# Create a table with these columns:
-
-# | Required Skills | Current Skill Level | Missing Skills | How to Improve |
-
-# Identify the important skills the user needs to develop
-# for the recommended career roles.
-
-# Do not assume the user has a skill unless they mentioned it.
-
-# ## 3. Your 90-Day Roadmap
-
-# Divide the roadmap into three stages:
-
-# ### Days 1–30: Foundation
-# ### Days 31–60: Skill Development
-# ### Days 61–90: Career Preparation
-
-# Provide practical weekly tasks for each stage.
-
-# Consider the user's available learning hours per week.
-
-# Include measurable outcomes wherever possible.
-
-# ## 4. One Thing to Do Today
-
-# Suggest ONE specific, achievable task that the user
-# can complete in less than 30 minutes.
-
-# It must be relevant to their career goal.
-
-# ## 5. Learning Resources
-
-# Recommend relevant resources such as:
-
-# - Free online courses
-# - Professional certifications
-# - Learning platforms
-# - Practical projects
-# - Relevant training opportunities
-
-# Clearly distinguish free and paid resources.
-
-# Keep the complete response concise, useful and personalised.
-# """
-
-
-# # --------------------------------------------------
-# # GEMINI API FUNCTION
-# # --------------------------------------------------
-
-# def generate_career_plan(profile):
-
-#     try:
-#         api_key = st.secrets["GEMINI_API_KEY"]
-#     except Exception:
-#         raise ValueError(
-#             "Gemini API key is missing. Add GEMINI_API_KEY "
-#             "to your Streamlit secrets."
-#         )
-
-#     client = genai.Client(api_key=api_key)
-
-#     user_prompt = f"""
-#     Analyse the following user profile and create a personalised
-#     career guidance plan.
-
-#     USER PROFILE:
-
-#     Name: {profile['name']}
-
-#     Education: {profile['education']}
-
-#     Current Status: {profile['status']}
-
-#     Skills: {profile['skills']}
-
-#     Interests: {profile['interests']}
-
-#     Career Goal: {profile['goal']}
-
-#     Available Learning Time: {profile['hours']} hours per week.
-
-#     Provide recommendations based only on this information.
-#     Follow the required output format exactly.
-#     """
-
-#     # Primary model followed by fallback model
-#     models = [
-#         "gemini-3.5-flash",
-#         "gemini-3.5-flash lite"
-#     ]
-
-#     last_error = None
-
-#     for model in models:
-
-#         for attempt in range(3):
-
-#             try:
-
-#                 response = client.models.generate_content(
-#                     model=model,
-#                     contents=user_prompt,
-#                     config={
-#                         "system_instruction": SYSTEM_PROMPT,
-#                         "temperature": 0.5,
-#                         "max_output_tokens": 6000
-#                     }
-#                 )
-
-#                 if response.text:
-#                     return response.text
-
-#                 raise ValueError(
-#                     "Gemini returned an empty response. Please try again."
-#                 )
-
-#             except errors.APIError as e:
-
-#                 last_error = e
-
-#                 error_code = getattr(e, "code", None)
-
-#                 # Retry temporary server and rate-limit errors
-#                 if error_code in [429, 500, 503, 504]:
-
-#                     if attempt < 2:
-#                         time.sleep(2 ** (attempt + 1))
-#                         continue
-
-#                     # Move to fallback model
-#                     break
-
-#                 # Other API errors should be shown immediately
-#                 raise e
-
-#             except ValueError:
-#                 raise
-
-#             except Exception as e:
-#                 last_error = e
-#                 break
-
-#     raise last_error or Exception(
-#         "Unable to generate the career plan."
-#     )
-
-
-# # --------------------------------------------------
-# # HEADER
-# # --------------------------------------------------
-
-# st.markdown(
-#     '<div class="main-title">🎯 AI Career Planner</div>',
-#     unsafe_allow_html=True
-# )
-
-# st.markdown(
-#     '<div class="subtitle">'
-#     'Discover suitable career paths and build a practical plan '
-#     'for your future.'
-#     '</div>',
-#     unsafe_allow_html=True
-# )
-
-
-# # --------------------------------------------------
-# # USER PROFILE FORM
-# # --------------------------------------------------
-
-# st.markdown(
-#     '<div class="section-title">Tell us about yourself</div>',
-#     unsafe_allow_html=True
-# )
-
-# st.write(
-#     "Share a few details so we can understand your background "
-#     "and recommend suitable career paths."
-# )
-
-# with st.form("career_form"):
-
-#     col1, col2 = st.columns(2)
-
-#     with col1:
-
-#         name = st.text_input(
-#             "Your Name",
-#             placeholder="Enter your name"
-#         )
-
-#         education = st.selectbox(
-#             "Highest Education / Current Education",
-#             [
-#                 "High School",
-#                 "Diploma",
-#                 "Undergraduate",
-#                 "Postgraduate",
-#                 "Doctorate",
-#                 "Other"
-#             ]
-#         )
-
-#         status = st.selectbox(
-#             "Current Status",
-#             [
-#                 "School Student",
-#                 "College Student",
-#                 "Recent Graduate",
-#                 "Working Professional",
-#                 "Looking for a Job",
-#                 "Career Change"
-#             ]
-#         )
-
-#     with col2:
-
-#         skills = st.text_area(
-#             "Your Current Skills",
-#             placeholder=(
-#                 "Example: Communication, Python, "
-#                 "Design, Writing, Excel..."
-#             ),
-#             height=110
-#         )
-
-#         interests = st.text_area(
-#             "Your Interests",
-#             placeholder=(
-#                 "Example: Technology, Business, "
-#                 "Healthcare, Creativity..."
-#             ),
-#             height=110
-#         )
-
-#     goal = st.text_area(
-#         "What is your Career Goal?",
-#         placeholder=(
-#             "Example: I want to get a job in the IT industry "
-#             "or start my own business."
-#         ),
-#         height=100
-#     )
-
-#     hours = st.slider(
-#         "How many hours can you spend learning per week?",
-#         min_value=1,
-#         max_value=40,
-#         value=5
-#     )
-
-#     submitted = st.form_submit_button(
-#         "Generate My Career Plan"
-#     )
-
-
-# # --------------------------------------------------
-# # GENERATE CAREER PLAN
-# # --------------------------------------------------
-
-# if submitted:
-
-#     if not name.strip():
-#         st.warning("Please enter your name.")
-
-#     elif not skills.strip():
-#         st.warning("Please enter your current skills.")
-
-#     elif not goal.strip():
-#         st.warning("Please describe your career goal.")
-
-#     else:
-
-#         profile = {
-#             "name": name.strip(),
-#             "education": education,
-#             "status": status,
-#             "skills": skills.strip(),
-#             "interests": interests.strip() or "Not specified",
-#             "goal": goal.strip(),
-#             "hours": hours
-#         }
-
-#         with st.spinner(
-#             "Analysing your profile and preparing your career plan..."
-#         ):
-
-#             try:
-
-#                 career_plan = generate_career_plan(profile)
-
-#                 st.session_state["career_plan"] = career_plan
-#                 st.session_state["profile_name"] = name.strip()
-
-#             except errors.APIError as e:
-
-#                 error_code = getattr(e, "code", "Unknown")
-#                 error_message = getattr(e, "message", str(e))
-
-#                 if error_code == 429:
-
-#                     st.error(
-#                         "API rate limit or quota exceeded. "
-#                         "Check your Gemini API usage and limits, "
-#                         "then try again."
-#                     )
-
-#                 elif error_code in [500, 503, 504]:
-
-#                     st.error(
-#                         "Gemini is temporarily unavailable. "
-#                         "Please try again in a few minutes."
-#                     )
-
-#                 elif error_code in [401, 403]:
-
-#                     st.error(
-#                         "API authentication failed. "
-#                         "Check your Gemini API key and permissions."
-#                     )
-
-#                 else:
-
-#                     st.error(
-#                         f"Gemini API Error ({error_code}): "
-#                         f"{error_message}"
-#                     )
-
-#             except ValueError as e:
-
-#                 st.error(str(e))
-
-#             except Exception as e:
-
-#                 st.error(
-#                     f"Something went wrong: {str(e)}"
-#                 )
-
-
-# # --------------------------------------------------
-# # DISPLAY CAREER PLAN
-# # --------------------------------------------------
-
-# if "career_plan" in st.session_state:
-
-#     st.markdown("---")
-
-#     st.markdown(
-#         f'<div class="section-title">'
-#         f'Your Career Plan, {st.session_state["profile_name"]}!'
-#         f'</div>',
-#         unsafe_allow_html=True
-#     )
-
-#     st.markdown(
-#         '<div class="result-box">',
-#         unsafe_allow_html=True
-#     )
-
-#     st.markdown(
-#         st.session_state["career_plan"]
-#     )
-
-#     st.markdown(
-#         '</div>',
-#         unsafe_allow_html=True
-#     )
-
-#     # Download career plan
-#     st.download_button(
-#         label="⬇️ Download My Career Plan",
-#         data=st.session_state["career_plan"],
-#         file_name="my_career_plan.md",
-#         mime="text/markdown"
-#     )
-
-#     # Generate another plan
-#     if st.button("Create a New Career Plan"):
-#         del st.session_state["career_plan"]
-#         st.rerun()
-
-
-# # --------------------------------------------------
-# # FOOTER
-# # --------------------------------------------------
-
-# st.markdown(
-#     """
-#     <div class="footer">
-#         Built at the Techolas AI Wing Weekend<br>
-#         AI-generated career suggestions are guidance, not guarantees.
-#     </div>
-#     """,
-#     unsafe_allow_html=True
-# )
